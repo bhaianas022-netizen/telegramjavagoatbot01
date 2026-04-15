@@ -1,0 +1,161 @@
+import os
+import requests
+from flask import Flask, request
+import telebot
+
+# ================= ENV VARIABLES =================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")  # HuggingFace AI token
+SMM_API_KEY = os.getenv("SMM_API_KEY")
+SMM_API_URL = os.getenv("SMM_API_URL")
+
+# Render automatically provides this variable in your environment
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL") 
+
+# ================= BOT INIT =================
+bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
+
+# ================= SERVICES =================
+services = {
+    "4678": "Instagram Followers 🚀 (1-5H)",
+    "3304": "Instagram Comments 💬 (Instant)",
+    "2904": "Story Views 👀 (Fast)",
+    "1348": "Reels Views 🎬 (30 Min)",
+    "1232": "Likes ❤️ (Fast)",
+    "2410": "Shares 🔁 (Instant)"
+}
+
+user_state = {}
+
+# ================= AI CHAT =================
+def ai_reply(message):
+    try:
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        payload = {"inputs": message}
+
+        res = requests.post(
+            "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium",
+            headers=headers,
+            json=payload,
+            timeout=10 # Added timeout so bot doesn't hang
+        )
+        
+        response_data = res.json()
+        
+        # Check if model is loading or returned an error
+        if isinstance(response_data, dict) and "error" in response_data:
+            return "🤖 AI is currently waking up, please try again in 30 seconds!"
+            
+        return response_data[0]["generated_text"]
+    except Exception as e:
+        print(f"AI Error: {e}")
+        return "🤖 Sorry, AI reply failed."
+
+# ================= COMMANDS =================
+@bot.message_handler(commands=['start'])
+def start(msg):
+    text = "🚀 Welcome to Anas Max Bot\n\nType /services to see services\nType /order to buy\n\nOr just chat with me 😎"
+    bot.reply_to(msg, text)
+
+@bot.message_handler(commands=['services'])
+def show_services(msg):
+    text = "📋 Services:\n\n"
+    for sid, name in services.items():
+        text += f"{sid} - {name}\n"
+    bot.reply_to(msg, text)
+
+@bot.message_handler(commands=['order'])
+def order(msg):
+    user_state[msg.chat.id] = {"step": "service"}
+    bot.reply_to(msg, "🆔 Send Service ID")
+
+# ================= MESSAGE HANDLER =================
+@bot.message_handler(func=lambda message: True)
+def handle(msg):
+    chat_id = msg.chat.id
+    text = msg.text
+
+    # ===== ORDER FLOW =====
+    if chat_id in user_state:
+        step = user_state[chat_id]["step"]
+
+        if step == "service":
+            if text in services:
+                user_state[chat_id]["service"] = text
+                user_state[chat_id]["step"] = "link"
+                bot.reply_to(msg, "🔗 Send Link")
+            else:
+                bot.reply_to(msg, "❌ Invalid Service ID")
+
+        elif step == "link":
+            user_state[chat_id]["link"] = text
+            user_state[chat_id]["step"] = "quantity"
+            bot.reply_to(msg, "🔢 Send Quantity")
+
+        elif step == "quantity":
+            service = user_state[chat_id]["service"]
+            link = user_state[chat_id]["link"]
+            quantity = text
+
+            payload = {
+                "key": SMM_API_KEY,
+                "action": "add",
+                "service": service,
+                "link": link,
+                "quantity": quantity
+            }
+
+            try:
+                res = requests.post(SMM_API_URL, data=payload).json()
+                order_id = res.get("order", "N/A")
+
+                bot.reply_to(msg, f"✅ Order Placed!\nOrder ID: {order_id}")
+            except:
+                bot.reply_to(msg, "❌ Order Failed")
+
+            user_state.pop(chat_id)
+
+        return
+
+    # ===== AUTO REPLIES =====
+    if "price" in text.lower():
+        bot.reply_to(msg, "💰 Cheap & best prices available")
+        return
+
+    if "time" in text.lower():
+        bot.reply_to(msg, "⏳ Delivery: Instant to few hours")
+        return
+
+    if "safe" in text.lower():
+        bot.reply_to(msg, "🔒 100% Safe services")
+        return
+
+    # ===== AI CHAT =====
+    bot.send_chat_action(msg.chat.id, 'typing')
+    reply = ai_reply(text)
+    bot.reply_to(msg, reply)
+
+# ================= WEBHOOK =================
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_str = request.get_data().decode("UTF-8")
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return "", 200
+    return "Forbidden", 403
+
+@app.route("/")
+def index():
+    return "Bot is running beautifully on Render!", 200
+
+# ================= START =================
+# Set webhook automatically if RENDER_URL exists
+if RENDER_URL:
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
+
+if __name__ == "__main__":
+    # This block is for local testing. On Render, Gunicorn will run the app.
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
